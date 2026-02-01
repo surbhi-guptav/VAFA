@@ -39,6 +39,9 @@ FIELD_KEY_MAP = {
     "Account Number": "account_number",
 }
 
+# Minimum classifier confidence required to accept prediction
+CONFIDENCE_THRESHOLD = 0.60
+
 
 # Caching Heavy Resources 
 @st.cache_resource(show_spinner=False)
@@ -125,21 +128,42 @@ def process_and_extract(text: str):
             return 'Name'
         return None
 
+    raw_label = None
+    raw_confidence = None
     try:
-        # primary call
-        raw_label = classifier.classify(processed)
+        raw_label, raw_confidence = classifier.classify(processed, return_prob=True)
     except TypeError:
         try:
             model, tokenizer = load_models()
-            raw_label = classifier.classify(processed, model=model, tokenizer=tokenizer)
+            raw_label, raw_confidence = classifier.classify(processed, model=model, tokenizer=tokenizer, return_prob=True)
         except Exception as e:
             logging.error(f"Classification failed: {e}")
             raw_label = None
+            raw_confidence = None
     except Exception as e:
         logging.error(f"Classification error: {e}")
         raw_label = None
+        raw_confidence = None
 
     label = canonicalize_label(str(raw_label) if raw_label is not None else None)
+
+    # Defensive rule: many casual questions ("where are you going", "how are you")
+    # are being misclassified by the model as 'Name'. If the raw text looks like
+    # a question (starts with a wh-word or ends with '?'), prefer to treat it as
+    # unknown so the UI can ask for clarification instead of extracting a name.
+    try:
+        tstrip = text.strip() if isinstance(text, str) else ""
+        if label == 'Name':
+            if re.search(r"^(where|what|who|why|how|when)\b", tstrip, re.I) or tstrip.endswith('?') or re.search(r"\b(where are you|how are you)\b", tstrip, re.I):
+                logging.info("Input looks like a question; overriding label to None")
+                label = None
+    except Exception:
+        pass
+
+    # if classifier is not confident enough, treat as unknown
+    if raw_confidence is not None and raw_confidence < CONFIDENCE_THRESHOLD:
+        logging.info(f"Low confidence ({raw_confidence:.3f}) - treating as unknown")
+        label = None
 
     # Heuristic classification fallback if still None
     if label is None:
@@ -150,17 +174,16 @@ def process_and_extract(text: str):
             label = 'Amount'
         elif re.search(r"\b(phone|mobile|contact|call)\b", t) or re.search(r"\b\d{10}\b", t):
             label = 'Phone Number'
-        else:
-            # default to Name if contains alphabetic words
-            if re.search(r"[a-zA-Z]", t):
-                label = 'Name'
+        # Do not default arbitrary alphabetic text to 'Name'.
+        # Leave label as None when no clear field evidence is found so the UI can ask for clarification.
 
     # ---- Extraction (robust) ---- #
     entity = None
     extractor_result = None
     if label:
         try:
-            extractor_result = extractor.extract(label, processed)
+            # pass both raw text and processed text to extractor for best results
+            extractor_result = extractor.extract(label, text, processed_text=processed)
         except TypeError:
             try:
                 model, tokenizer = load_models()
