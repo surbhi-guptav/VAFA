@@ -7,7 +7,7 @@ text = "My name is dhani and i want to deposit 4000 rs and My account number is 
 
 p = TextProcessor()
 c = TextClassifier()
-e = ExtractFields()
+e = ExtractFields() 
 
 processed = p.process_text(text)
 try:
